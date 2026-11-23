@@ -1,0 +1,37 @@
+
+*ROBO ADI - Smart Dustbin V1.0
+
+#BORN TO INNOVATE
+
+I am working on a Smart Dustbin project using ESP32. 
+The main idea of this project is to make a dustbin more automatic and useful with the help of electronics.
+
+'Main Features'
+
+1. PCB Design: I designed my own PCB using KiCad.
+
+2. ESP32: I selected ESP32-WROOM-32 as the main controller.
+
+3. Automatic Lid: A SG90 servo motor will open and close the dustbin lid automatically.
+
+4. Hand Detection: HC-SR04 ultrasonic sensor will detect the hand near the dustbin opening.
+
+5. RGB LEDs: I added 8 WS2812B RGB LEDs to show different status using colours.
+
+6. Buzzer: A passive buzzer will give sound alerts when needed.
+
+7. OLED Display: The display will show system information.
+
+8. Wi-Fi Dashboard: ESP32 will create its own Wi-Fi network. Users can connect their phone and check the dustbin status without internet.
+
+9. Circuit Planning: I planned the component connections, GPIO pins and power supply for the project.
+
+(My Aim)
+
+My aim is to make a low-cost and useful smart dustbin.
+ I want to combine PCB designing, electronics, programming and automation in one project.
+
+Project Name: ROBO ADI Smart Dustbin V1.0
+Developer: Aditya
+Controller: ESP32-WROOM-32
+PCB Software: KiCad

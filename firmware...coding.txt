@@ -1,0 +1,422 @@
+11.22 12:17 PM
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_NeoPixel.h>
+#include <ESP32Servo.h>
+
+// Pin configuration
+const int TRIG_PIN = 25;
+const int ECHO_PIN = 26;
+const int SERVO_PIN = 13;
+const int BUZZER_PIN = 27;
+const int LED_PIN = 23;
+const int OLED_SDA = 21;
+const int OLED_SCL = 22;
+
+// Hardware settings
+const int LED_COUNT = 8;
+const int LID_OPEN_ANGLE = 75;
+const int LID_CLOSED_ANGLE = 0;
+const int OLED_ADDRESS = 0x3C;
+
+// Sensor calibration
+const float HAND_MIN_CM = 4.0;
+const float HAND_MAX_CM = 12.0;
+const float BIN_EMPTY_CM = 45.0;
+const float BIN_FULL_CM = 18.0;
+
+// Timing
+const unsigned long SENSOR_INTERVAL = 120;
+const unsigned long LID_CLOSE_DELAY = 2000;
+const unsigned long FULL_ALERT_INTERVAL = 10000;
+
+// Wi-Fi settings
+const char* WIFI_NAME = "ROBO-ADI-DUSTBIN";
+const char* WIFI_PASSWORD = "dustbin123";
+
+// Hardware objects
+Servo lidServo;
+WebServer server(80);
+
+Adafruit_NeoPixel pixels(
+  LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800
+);
+
+Adafruit_SSD1306 display(
+  128, 64, &Wire, -1
+);
+
+// System variables
+float distanceCM = -1;
+int fillPercent = 0;
+
+bool lidOpen = false;
+bool handDetected = false;
+bool sensorWorking = false;
+bool oledWorking = false;
+
+int handReadings = 0;
+
+unsigned long lastSensorTime = 0;
+unsigned long lastHandTime = 0;
+unsigned long lastFullAlertTime = 0;
+unsigned long lastDisplayTime = 0;
+
+// Buzzer
+void playBeep(int frequency, int duration) {
+  tone(BUZZER_PIN, frequency, duration);
+}
+
+// RGB LEDs
+void setAllLEDs(uint32_t colour) {
+  for (int i = 0; i < LED_COUNT; i++) {
+    pixels.setPixelColor(i, colour);
+  }
+  pixels.show();
+}
+
+void updateLighting() {
+  if (!sensorWorking) {
+    static bool ledState = false;
+    static unsigned long lastBlink = 0;
+
+    if (millis() - lastBlink >= 400) {
+      lastBlink = millis();
+      ledState = !ledState;
+    }
+
+    setAllLEDs(
+      ledState ? pixels.Color(255, 80, 0)
+               : pixels.Color(0, 0, 0)
+    );
+    return;
+  }
+
+  if (lidOpen) {
+    setAllLEDs(pixels.Color(0, 0, 255));
+  }
+  else if (fillPercent >= 90) {
+    setAllLEDs(pixels.Color(255, 0, 0));
+  }
+  else {
+    setAllLEDs(pixels.Color(0, 180, 0));
+  }
+}
+
+// Lid control
+void openLid() {
+  if (lidOpen) return;
+
+  lidServo.write(LID_OPEN_ANGLE);
+  lidOpen = true;
+  playBeep(1800, 100);
+
+  Serial.println("Lid opened");
+}
+
+void closeLid() {
+  if (!lidOpen) return;
+
+  lidServo.write(LID_CLOSED_ANGLE);
+  lidOpen = false;
+
+  Serial.println("Lid closed");
+}
+
+// Ultrasonic sensor
+float readDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(3);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration = pulseIn(
+    ECHO_PIN, HIGH, 30000
+  );
+
+  if (duration == 0) return -1;
+
+  return duration * 0.0343 / 2.0;
+}
+
+// Fill-level calculation
+void updateFillLevel(float distance) {
+  if (distance < 0) return;
+
+  if (distance >= BIN_EMPTY_CM) {
+    fillPercent = 0;
+    return;
+  }
+
+  if (distance <= BIN_FULL_CM) {
+    fillPercent = 100;
+    return;
+  }
+
+  float percentage =
+    ((BIN_EMPTY_CM - distance) /
+    (BIN_EMPTY_CM - BIN_FULL_CM)) * 100.0;
+
+  fillPercent = constrain(
+    (int)percentage, 0, 100
+  );
+}
+
+// OLED display
+void updateDisplay() {
+  if (!oledWorking) return;
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("ROBO ADI DUSTBIN");
+  display.println("----------------");
+
+  display.setTextSize(2);
+  display.setCursor(0, 20);
+  display.print(fillPercent);
+  display.println("%");
+
+  display.setTextSize(1);
+  display.setCursor(0, 48);
+
+  if (!sensorWorking) {
+    display.println("Sensor error");
+  }
+  else if (lidOpen) {
+    display.println("Lid: OPEN");
+  }
+  else if (fillPercent >= 90) {
+    display.println("Bin almost full");
+  }
+  else {
+    display.println("Lid: CLOSED");
+  }
+
+  display.display();
+}
+
+// Phone dashboard
+void showDashboard() {
+  String page = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="3">
+    <title>ROBO ADI Smart Dustbin</title>
+    <style>
+      body {
+        background: #101820;
+        color: white;
+        font-family: Arial;
+        text-align: center;
+        padding: 20px;
+      }
+      .card {
+        background: #263746;
+        padding: 20px;
+        margin: 15px auto;
+        border-radius: 15px;
+        max-width: 350px;
+      }
+      .value {
+        font-size: 35px;
+        color: #00e5ff;
+      }
+      h1 {
+        color: #00e5ff;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ROBO ADI</h1>
+    <h3>SMART DUSTBIN V1.0</h3>
+
+    <div class="card">
+      <h2>Garbage Level</h2>
+      <div class="value">)rawliteral";
+
+  page += String(fillPercent);
+
+  page += R"rawliteral(%</div>
+    </div>
+
+    <div class="card">
+      <h2>Lid Status</h2>
+      <div class="value">)rawliteral";
+
+  page += lidOpen ? "OPEN" : "CLOSED";
+
+  page += R"rawliteral(</div>
+    </div>
+
+    <div class="card">
+      <h2>Sensor Distance</h2>
+      <div class="value">)rawliteral";
+
+  if (distanceCM < 0) {
+    page += "No echo";
+  }
+  else {
+    page += String(distanceCM, 1) + " cm";
+  }
+
+  page += R"rawliteral(</div>
+    </div>
+
+    <div class="card">
+      <h2>System Status</h2>
+      <div class="value">)rawliteral";
+
+  if (!sensorWorking) {
+    page += "SENSOR ERROR";
+  }
+  else if (fillPercent >= 90) {
+    page += "BIN FULL";
+  }
+  else {
+    page += "NORMAL";
+  }
+
+  page += R"rawliteral(</div>
+    </div>
+
+    <p>BORN TO INNOVATE</p>
+  </body>
+  </html>
+  )rawliteral";
+
+  server.send(200, "text/html", page);
+}
+
+// Wi-Fi access point
+void startWiFi() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(WIFI_NAME, WIFI_PASSWORD);
+
+  Serial.println("Wi-Fi started");
+  Serial.print("Dashboard address: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", showDashboard);
+  server.begin();
+}
+
+// Setup
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  lidServo.setPeriodHertz(50);
+  lidServo.attach(SERVO_PIN, 500, 2400);
+  lidServo.write(LID_CLOSED_ANGLE);
+
+  pixels.begin();
+  pixels.setBrightness(35);
+  pixels.clear();
+  pixels.show();
+
+  Wire.begin(OLED_SDA, OLED_SCL);
+
+  oledWorking = display.begin(
+    SSD1306_SWITCHCAPVCC,
+    OLED_ADDRESS
+  );
+
+  if (oledWorking) {
+    display.clearDisplay();
+    display.display();
+  }
+
+  startWiFi();
+
+  setAllLEDs(pixels.Color(0, 180, 0));
+  playBeep(1500, 150);
+
+  Serial.println("ROBO ADI SMART DUSTBIN");
+  Serial.println("System ready");
+}
+
+// Main loop
+void loop() {
+  server.handleClient();
+
+  unsigned long now = millis();
+
+  if (now - lastSensorTime >= SENSOR_INTERVAL) {
+    lastSensorTime = now;
+
+    distanceCM = readDistance();
+    sensorWorking = (distanceCM > 0);
+
+    if (!sensorWorking) {
+      handReadings = 0;
+      handDetected = false;
+    }
+    else {
+      if (
+        distanceCM >= HAND_MIN_CM &&
+        distanceCM <= HAND_MAX_CM
+      ) {
+        handReadings++;
+
+        if (handReadings >= 2) {
+          handDetected = true;
+          lastHandTime = now;
+        }
+      }
+      else {
+        handReadings = 0;
+        handDetected = false;
+      }
+
+      if (!handDetected && distanceCM > HAND_MAX_CM) {
+        updateFillLevel(distanceCM);
+      }
+    }
+
+    if (handDetected) {
+      openLid();
+      lastHandTime = now;
+    }
+
+    if (
+      lidOpen &&
+      !handDetected &&
+      now - lastHandTime >= LID_CLOSE_DELAY
+    ) {
+      closeLid();
+    }
+  }
+
+  if (
+    sensorWorking &&
+    fillPercent >= 90 &&
+    !lidOpen &&
+    now - lastFullAlertTime >= FULL_ALERT_INTERVAL
+  ) {
+    lastFullAlertTime = now;
+    playBeep(1000, 250);
+  }
+
+  updateLighting();
+
+  if (now - lastDisplayTime >= 300) {
+    lastDisplayTime = now;
+    updateDisplay();
+  }
+}
